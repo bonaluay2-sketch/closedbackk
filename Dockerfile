@@ -7,7 +7,7 @@ FROM base AS build
 ENV HUSKY=0
 # Copy package files first for better caching
 COPY package*.json ./
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,id=s/f28c2318-fc2b-4487-ad2d-05e9c09ff888-/root/.npm,target=/root/.npm \
     npm ci
 
 # Copy only what's needed for build
@@ -32,7 +32,7 @@ FROM base AS prod-deps
 ENV HUSKY=0
 ENV NPM_CONFIG_IGNORE_SCRIPTS=1
 COPY package*.json ./
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,id=s/f28c2318-fc2b-4487-ad2d-05e9c09ff888-/root/.npm,target=/root/.npm \
     npm ci --omit=dev
 
 # Final production image
