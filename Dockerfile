@@ -19,6 +19,10 @@ COPY resources ./resources
 COPY proprietary ./proprietary
 COPY src ./src
 
+# Provide dummy build credentials so the template engine doesn't crash compiling the UI
+ENV TURNSTILE_SITE_KEY="1x00000000000000000000AA"
+ENV TURNSTILE_SECRET_KEY="1x0000000000000000000000000000000AA"
+
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT="$GIT_COMMIT"
 RUN npm run build-prod
@@ -34,26 +38,6 @@ RUN --mount=type=cache,target=/root/.npm \
 # Final production image
 FROM base
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    nginx \
-    curl \
-    wget \
-    supervisor \
-    apache2-utils \
-    && rm -rf /var/lib/apt/lists/*
-
-# Update worker_connections in nginx.conf
-RUN sed -i 's/worker_connections [0-9]*/worker_connections 8192/' /etc/nginx/nginx.conf
-
-# Setup supervisor configuration
-RUN mkdir -p /var/log/supervisor
-COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
-# Copy Nginx configuration
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-RUN rm -f /etc/nginx/sites-enabled/default
-
 # Copy production node_modules from prod-deps stage (cached separately from build)
 COPY --from=prod-deps /usr/src/app/node_modules ./node_modules
 COPY package*.json ./
@@ -68,19 +52,55 @@ RUN rm -rf ./resources/maps
 COPY tsconfig.json ./
 COPY src ./src
 
-
 ARG GIT_COMMIT=unknown
 RUN echo "$GIT_COMMIT" > static/commit.txt
-
 ENV GIT_COMMIT="$GIT_COMMIT"
 
+# PURGE LOCAL ENV CONFIGS EVERYWHERE TO PREVENT RE-INJECTION OVERRIDES
+RUN rm -rf .env .env.* src/server/.env src/server/.env.*
+
+# EXPOSE the required Hugging Face Port
+EXPOSE 7860
+
+# Inject a clean, unified runtime startup script
 RUN <<'EOF' tee /usr/local/bin/start.sh
 #!/bin/sh
-if [ "$DOMAIN" = openfront.dev ] && [ "$SUBDOMAIN" != main ]; then
-    exec timeout 25h /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
-else
-    exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
-fi
+
+# Write an intermediate launcher that injects environment maps directly inside the JS execution layer.
+# This forces the internal cluster framework to safely evaluate loopbacks on port 7860 without throwing URL syntax crashes.
+cat << 'NODE_SCRIPT' > launch.js
+process.env.NODE_ENV = 'production';
+process.env.GAME_ENV = 'prod';
+process.env.NUM_WORKERS = '1';
+process.env.PORT = '7860';
+process.env.BACKEND_PORT = '7860';
+process.env.DOMAIN = '127.0.0.1:7860';
+process.env.BACKEND_URL = 'http://127.0.0.1:7860';
+process.env.LOBBY_SERVER_URL = 'http://127.0.0.1:7860';
+process.env.API_URL = 'http://127.0.0.1:7860';
+process.env.TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
+process.env.TURNSTILE_SECRET_KEY = '1x0000000000000000000000000000000AA';
+
+// Intercept all system variable polls to guarantee deep configuration values match exactly
+const originalEnv = process.env;
+process.env = new Proxy({}, {
+  get: (target, prop) => {
+    if (prop === 'DOMAIN') return '127.0.0.1:7860';
+    if (prop === 'BACKEND_URL' || prop === 'LOBBY_SERVER_URL' || prop === 'API_URL') return 'http://127.0.0.1:7860';
+    if (prop === 'PORT' || prop === 'BACKEND_PORT') return '7860';
+    if (prop === 'TURNSTILE_SITE_KEY') return '1x00000000000000000000AA';
+    if (prop === 'TURNSTILE_SECRET_KEY') return '1x0000000000000000000000000000000AA';
+    return originalEnv[prop];
+  }
+});
+
+// Run tsx CLI to safely execute the app engine
+require('tsx/cli');
+NODE_SCRIPT
+
+echo "Launching OpenFront Process Mesh on port 7860..."
+exec npx tsx launch.js src/server/Server.ts --port 7860 --host 0.0.0.0
 EOF
+
 RUN chmod +x /usr/local/bin/start.sh
 ENTRYPOINT ["/usr/local/bin/start.sh"]
